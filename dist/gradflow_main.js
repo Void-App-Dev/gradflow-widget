@@ -1,4 +1,3 @@
-//neww
 
 <script>
 (function () {
