@@ -1,5 +1,4 @@
 
-<script>
 (function () {
   const container = document.getElementById('gradflow');
   if (!container) return;
@@ -375,4 +374,3 @@ void main() {
     window.removeEventListener('resize', onResize);
   });
 })();
-</script>
