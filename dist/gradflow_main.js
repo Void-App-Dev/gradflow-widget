@@ -47,7 +47,207 @@ uniform vec2 u_mouse;
 
 varying vec2 vUv;
 
-// (gradient + noise functions unchanged …)
+#define PI 3.14159265359
+
+// --- Film-style grain helpers ---
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
+float valueNoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  float a = hash12(i);
+  float b = hash12(i + vec2(1.0, 0.0));
+  float c = hash12(i + vec2(0.0, 1.0));
+  float d = hash12(i + vec2(1.0, 1.0));
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+float fbm(vec2 p) {
+  float s = 0.0, a = 0.5;
+  for (int i = 0; i < 4; i++) {
+    s += a * valueNoise(p);
+    p *= 2.0;
+    a *= 0.5;
+  }
+  return s;
+}
+
+float luma(vec3 c) {
+  return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+float filmGrain(vec2 px, float time, float strength) {
+  float frame = floor(time * 24.0);
+  float ang = frame * 2.39996323;
+  mat2 R = mat2(cos(ang), -sin(ang), sin(ang), cos(ang));
+  vec2 rp = R * (px * 0.75);
+  float g = fbm(rp + frame); // 0..1
+  return (g - 0.5) * 2.0 * strength;
+}
+
+// --- Gradient utils from your original ---
+float noise(vec2 st) {
+  return fract(sin(dot(st, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+vec3 linearGradient(vec2 uv, float time) {
+  float t = (uv.y * u_scale) + sin(uv.x * PI + time) * 0.1;
+  t = clamp(t, 0.0, 1.0);
+  return t < 0.5
+    ? mix(u_color1, u_color2, t * 2.0)
+    : mix(u_color2, u_color3, (t - 0.5) * 2.0);
+}
+
+vec3 conicGradient(vec2 uv, float time) {
+  vec2 center = vec2(0.5);
+  vec2 pos = uv - center;
+  float angle = atan(pos.y, pos.x);
+  float normalizedAngle = (angle + PI) / (2.0 * PI);
+  float t = fract(normalizedAngle * u_scale + time * 0.3);
+  float smoothT = t;
+  vec3 color;
+  if (smoothT < 0.33) {
+    color = mix(u_color1, u_color2, smoothstep(0.0, 0.33, smoothT));
+  } else if (smoothT < 0.66) {
+    color = mix(u_color2, u_color3, smoothstep(0.33, 0.66, smoothT));
+  } else {
+    color = mix(u_color3, u_color1, smoothstep(0.66, 1.0, smoothT));
+  }
+  float dist = length(pos);
+  color += sin(dist * 8.0 + time * 1.5) * 0.03;
+  return color;
+}
+
+#define S(a,b,t) smoothstep(a,b,t)
+
+mat2 Rot(float a) {
+  float s = sin(a);
+  float c = cos(a);
+  return mat2(c, -s, s, c);
+}
+
+vec2 hash(vec2 p) {
+  p = vec2(dot(p, vec2(2127.1, 81.17)), dot(p, vec2(1269.5, 283.37)));
+  return fract(sin(p) * 43758.5453);
+}
+
+float advancedNoise(in vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  float n = mix(mix(dot(-1.0 + 2.0 * hash(i + vec2(0.0, 0.0)), f - vec2(0.0, 0.0)), 
+                    dot(-1.0 + 2.0 * hash(i + vec2(1.0, 0.0)), f - vec2(1.0, 0.0)), u.x),
+                mix(dot(-1.0 + 2.0 * hash(i + vec2(0.0, 1.0)), f - vec2(0.0, 1.0)), 
+                    dot(-1.0 + 2.0 * hash(i + vec2(1.0, 1.0)), f - vec2(1.0, 1.0)), u.x), u.y);
+  return 0.5 + 0.5 * n;
+}
+
+vec3 animatedGradient(vec2 uv, float time) {
+  float ratio = u_resolution.x / u_resolution.y;
+  vec2 tuv = uv;
+  tuv -= 0.5;
+  float degree = advancedNoise(vec2(time * 0.1 * u_speed, tuv.x * tuv.y));
+  tuv.y *= 1.0 / ratio;
+  tuv *= Rot(radians((degree - 0.5) * 720.0 * u_scale + 180.0));
+  tuv.y *= ratio;
+  float frequency = 5.0 * u_scale;
+  float amplitude = 30.0;
+  float speed = time * 2.0 * u_speed;
+  tuv.x += sin(tuv.y * frequency + speed) / amplitude;
+  tuv.y += sin(tuv.x * frequency * 1.5 + speed) / (amplitude * 0.5);
+  vec3 layer1 = mix(u_color1, u_color2, S(-0.3, 0.2, (tuv * Rot(radians(-5.0))).x));
+  vec3 layer2 = mix(u_color2, u_color3, S(-0.3, 0.2, (tuv * Rot(radians(-5.0))).x));
+  vec3 finalComp = mix(layer1, layer2, S(0.05, -0.2, tuv.y));
+  return finalComp;
+}
+
+vec3 waveGradient(vec2 uv, float time) {
+  float y = uv.y;
+  float wave1 = sin(uv.x * PI * u_scale * 0.8 + time * u_speed * 0.5) * 0.1;
+  float wave2 = sin(uv.x * PI * u_scale * 0.5 + time * u_speed * 0.3) * 0.15;  
+  float wave3 = sin(uv.x * PI * u_scale * 1.2 + time * u_speed * 0.8) * 0.2; 
+  float flowingY = y + wave1 + wave2 + wave3;
+  float pattern = smoothstep(0.0, 1.0, clamp(flowingY, 0.0, 1.0));
+  vec3 color;
+  if (pattern < 0.33) {
+    float t = smoothstep(0.0, 0.33, pattern);
+    color = mix(u_color1, u_color2, t);
+  } else if (pattern < 0.66) {
+    float t = smoothstep(0.33, 0.66, pattern);
+    color = mix(u_color2, u_color3, t);
+  } else {
+    float t = smoothstep(0.66, 1.0, pattern);
+    color = mix(u_color3, u_color1, t);
+  }
+  float variation = sin(uv.x * PI * 2.0 + time * u_speed) *
+                    cos(uv.y * PI * 1.5 + time * u_speed * 0.7) * 0.02;
+  color += variation;
+  return clamp(color, 0.0, 1.0);
+}
+
+vec3 silkGradient(vec2 uv, float time) {
+  vec2 fragCoord = uv * u_resolution;
+  vec2 invResolution = 1.0 / u_resolution.xy;
+  vec2 centeredUv = (fragCoord * 2.0 - u_resolution.xy) * invResolution;
+  centeredUv *= u_scale;
+  float dampening = 1.0 / (1.0 + u_scale * 0.1);
+  float d = -time * u_speed * 0.5;
+  float a = 0.0;
+  for (float i = 0.0; i < 8.0; ++i) {
+      a += cos(i - d - a * centeredUv.x) * dampening;
+      d += sin(centeredUv.y * i + a) * dampening;
+  }
+  d += time * u_speed * 0.5;
+  vec3 patterns = vec3(
+    cos(centeredUv.x * d + a) * 0.5 + 0.5,
+    cos(centeredUv.y * a + d) * 0.5 + 0.5,
+    cos((centeredUv.x + centeredUv.y) * (d + a) * 0.5) * 0.5 + 0.5
+  );
+  vec3 color1Mix = mix(u_color1, u_color2, patterns.x);
+  vec3 color2Mix = mix(u_color2, u_color3, patterns.y);
+  vec3 color3Mix = mix(u_color3, u_color1, patterns.z);
+  vec3 finalColor = mix(color1Mix, color2Mix, patterns.z);
+  finalColor = mix(finalColor, color3Mix, patterns.x * 0.5);
+  vec3 originalPattern = vec3(cos(centeredUv * vec2(d, a)) * 0.6 + 0.4, cos(a + d) * 0.5 + 0.5);
+  originalPattern = cos(originalPattern * cos(vec3(d, a, 2.5)) * 0.5 + 0.5);
+  return mix(finalColor, originalPattern * finalColor, 0.3);
+}
+
+vec3 smokeGradient(vec2 uv, float time) {
+  float mr = min(u_resolution.x, u_resolution.y);
+  vec2 fragCoord = uv * u_resolution;
+  vec2 p = (2.0 * fragCoord.xy - u_resolution.xy) / mr;
+  p *= u_scale;
+  float iTime = time * u_speed;
+  for(int i = 1; i < 10; i++) {
+    vec2 newp = p;
+    float fi = float(i);
+    newp.x += 0.6 / fi * sin(fi * p.y + iTime + 0.3 * fi) + 1.0;
+    newp.y += 0.6 / fi * sin(fi * p.x + iTime + 0.3 * (fi + 10.0)) - 1.4;
+    p = newp;
+  }
+  float greenPattern = clamp(1.0 - sin(p.y), 0.0, 1.0);
+  float bluePattern = sin(p.x + p.y) * 0.5 + 0.5;
+  vec3 color12 = mix(u_color1, u_color2, greenPattern);
+  vec3 color = mix(color12, u_color3, bluePattern);
+  return clamp(color, 0.0, 1.0);
+}
+
+vec3 stripeGradient(vec2 uv, float time) {
+  vec2 p = ((uv * u_resolution * 2.0 - u_resolution.xy) / (u_resolution.x + u_resolution.y) * 2.0) * u_scale;
+  float t = time * 0.7, a = 4.0 * p.y - sin(-p.x * 3.0 + p.y - t);
+  a = smoothstep(cos(a) * 0.7, sin(a) * 0.7 + 1.0, cos(a - 4.0 * p.y) - sin(a + 3.0 * p.x));
+  vec2 warped = (cos(a) * p + sin(a) * vec2(-p.y, p.x)) * 0.5 + 0.5;
+  vec3 color = mix(u_color1, u_color2, warped.x);
+  color = mix(color, u_color3, warped.y);
+  color *= color + 0.6 * sqrt(color);
+  return clamp(color, 0.0, 1.0);
+}
+
 
 void main() {
   vec2 uv = vUv;
